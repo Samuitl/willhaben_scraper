@@ -1,0 +1,11 @@
+{
+  "db_path": "willhaben.db",
+  "request_delay_seconds": 1.0,
+  "rows_per_page": 200,
+  "stop_below_items": 198,
+  "max_pages": 999,
+  "mode": "full",
+  "categories": [],
+  "exclude_categories": [],
+  "log_level": "INFO"
+}

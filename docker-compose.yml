@@ -1,0 +1,107 @@
+# willhaben-System: PostgreSQL + Scraper/Scheduler + Kopf (Detail-Abrufe und Bilder)
+# Start:  bash make-secrets.sh && docker compose up -d --build
+name: willhaben
+
+x-app: &app
+  build: .
+  image: willhaben-app:latest
+  restart: unless-stopped
+  depends_on:
+    db:
+      condition: service_healthy
+  networks: [backend, internet]       # backend: Datenbank (intern), internet: Zugriff auf willhaben
+  secrets: [db_app_password]
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  stop_grace_period: 90s              # laufende Seite/Auftrag darf fertig werden
+  healthcheck:
+    test: ["CMD", "python", "healthcheck.py"]    # prüft die Heartbeat-Datei
+    interval: 60s
+    timeout: 10s
+    retries: 3
+    start_period: 120s
+
+x-app-env: &app-env
+  TZ: Europe/Vienna
+  WH_DB_BACKEND: postgres
+  WH_DB_HOST: db
+  WH_DB_NAME: willhaben
+  WH_DB_USER: willhaben_app
+  WH_DB_PASSWORD_FILE: /run/secrets/db_app_password
+  WH_LOG_FILE: ""                     # Logs nur nach stdout -> docker compose logs
+  WH_HEARTBEAT_FILE: /tmp/alive
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: willhaben
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_admin_password
+      TZ: Europe/Vienna
+    secrets: [postgres_admin_password, db_app_password, db_api_password]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/db-init:/docker-entrypoint-initdb.d:ro
+    networks: [backend]               # kein Port nach außen
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d willhaben"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  scraper:                            # Scraper + Scheduler (stündlich incremental, wöchentlich full)
+    <<: *app
+    command: ["python", "scheduler.py"]
+    environment:
+      <<: *app-env
+      WH_LOCK_FILE: /data/willhaben.lock
+      WH_DEBUG_DIR: /data/debug
+    volumes:
+      - scraper_data:/data
+      - ./config.json:/app/config.json:ro      # Einstellungen ändern ohne neu zu bauen (dann: docker compose restart scraper)
+
+  head:                               # Kopf: Detail-Abrufe und Bilder aus der Tabelle enrichment_tasks
+    <<: *app
+    command: ["python", "head.py"]
+    environment:
+      <<: *app-env
+      WH_HEAD_MEDIA_DIR: /media
+    volumes:
+      - media:/media
+      - ./config.json:/app/config.json:ro
+
+  # Beispiel: deine Auswertungs-API (nur im internen Netz, kein Internet nötig)
+  # api:
+  #   build: ../meine-api
+  #   restart: unless-stopped
+  #   networks: [backend]
+  #   environment:
+  #     DB_HOST: db
+  #     DB_NAME: willhaben
+  #     DB_USER: willhaben_api
+  #     DB_PASSWORD_FILE: /run/secrets/db_api_password
+  #     MEDIA_DIR: /media
+  #   secrets: [db_api_password]
+  #   volumes:
+  #     - media:/media:ro             # Bilder nur lesen
+  #   # Erreichbarkeit von außen: über deinen Reverse-Proxy (zusätzliches Netzwerk), nicht über die DB-Ports
+
+networks:
+  backend:
+    internal: true                    # ohne Zugang ins Internet
+  internet: {}
+
+volumes:
+  pgdata:
+  scraper_data:
+  media:
+
+secrets:
+  postgres_admin_password:
+    file: ./secrets/postgres_admin_password.txt
+  db_app_password:
+    file: ./secrets/db_app_password.txt
+  db_api_password:
+    file: ./secrets/db_api_password.txt

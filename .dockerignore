@@ -1,0 +1,13 @@
+secrets/
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+*.log
+*.lock
+debug/
+media/
+.git/
+README.md
+docker-compose.yml

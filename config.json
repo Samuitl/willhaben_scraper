@@ -1,0 +1,28 @@
+{
+  "db_path": "willhaben.db",
+  "request_delay_seconds": 4.0,
+  "rows_per_page": 200,
+  "stop_below_items": 198,
+  "max_pages": 999,
+  "mode": "full",
+  "categories": [],
+  "exclude_categories": [
+    "Baby / Kind"
+  ],
+  "log_level": "INFO",
+  "priority_categories": [
+    "Uhren / Schmuck",
+    "Smartphones / Telefonie",
+    "Computer / Software",
+    "Kameras / TV / Multimedia",
+    "Games / Konsolen"
+  ],
+  "proxy_enabled": false,
+  "proxy_url": null,
+  "proxy_user": null,
+  "proxy_use_for": [
+    "search",
+    "detail",
+    "images"
+  ]
+}

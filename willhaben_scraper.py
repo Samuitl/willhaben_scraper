@@ -131,6 +131,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "proxy_password": None,            # Passwort im Klartext (nicht empfohlen, besser proxy_password_file)
     "proxy_password_file": None,       # Pfad zur Passwort-Datei (Docker secret), z.B. /run/secrets/proxy_password
     "proxy_use_for": ["search", "detail", "images"],   # welche Anfragearten über den Proxy laufen
+    "proxy_new_connection_per_request": False,   # true = jede Anfrage baut einen neuen Tunnel auf (Rotator wechselt dann die IP)
+    "proxy_reconnect_on_429": True,    # nach einer 429 den Tunnel schließen und neu aufbauen (Rotator vergibt dann evtl. eine neue IP)
+    "proxy_rotating_429_retries": 3,   # so oft mit neuem Tunnel wiederholen, bevor eine 429 als Sperre gilt
     # --- Scheduler (scheduler.py) ---
     "schedule_timezone": "Europe/Vienna",
     "schedule_incremental_minutes": 60,
@@ -531,6 +534,8 @@ class HttpClient:
         if self.proxy:
             self.session.trust_env = False            # nur dieser Proxy, keine Umgebungsvariablen
             self.session.proxies = {"http": self.proxy, "https": self.proxy}
+        self.fresh = bool(self.proxy and cfg.get("proxy_new_connection_per_request"))
+        self.reconnect_on_429 = bool(self.proxy and cfg.get("proxy_reconnect_on_429", True))
         if limiter not in _PROXY_LOGGED:
             _PROXY_LOGGED.add(limiter)
             log.info("Verbindung '%s': %s", limiter,
@@ -570,7 +575,11 @@ class HttpClient:
             self._wait(self.limiter.acquire())          # gemeinsames Tempo, wartet auch eine 429-Sperre ab
             retry_after: Optional[float] = None
             try:
-                resp = self.session.get(url, params=params, headers=req_headers, timeout=cfg["timeout_seconds"])
+                try:
+                    resp = self.session.get(url, params=params, headers=req_headers, timeout=cfg["timeout_seconds"])
+                finally:
+                    if self.fresh:
+                        self.session.close()        # Tunnel schließen: nächste Anfrage = neue Verbindung = neue IP
             except (requests.Timeout, requests.ConnectionError,
                     requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError) as e:
                 problem = self._scrub(f"Netzwerkfehler: {e.__class__.__name__}: {str(e)[:200]}")
@@ -592,11 +601,17 @@ class HttpClient:
                         f"HTTP {code} für {resp.url} – Zugriff verweigert/blockiert. {_block_info(resp)}",
                         status=code,
                     )
-                if code == 429 and blocks == 0 and confirmed < int(cfg.get("rate_confirm_retries", 1)):
+                max_confirm = int(cfg.get("rate_confirm_retries", 1))
+                if self.fresh or self.reconnect_on_429:
+                    max_confirm = max(max_confirm, int(cfg.get("proxy_rotating_429_retries", 3)))
+                if code == 429 and blocks == 0 and confirmed < max_confirm:
                     confirmed += 1
                     pause = float(cfg.get("rate_confirm_delay_seconds", 5.0))
-                    log.warning("HTTP 429 (Retry-After %s) – eine Bestätigungs-Anfrage in %.0f s; erst eine zweite 429 "
-                                "gilt als Sperre", resp.headers.get("Retry-After", "-"), pause)
+                    log.warning("HTTP 429 (Retry-After %s) – Bestätigungs-Anfrage %d/%d in %.0f s%s; erst danach gilt "
+                                "es als Sperre", resp.headers.get("Retry-After", "-"), confirmed, max_confirm, pause,
+                                " über einen neuen Tunnel" if (self.fresh or self.reconnect_on_429) else "")
+                    if self.reconnect_on_429 and not self.fresh:
+                        self.session.close()        # Tunnel schließen: die Wiederholung baut eine neue Verbindung auf
                     self._wait(pause)
                     continue
                 if code == 429:

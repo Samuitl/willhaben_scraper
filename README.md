@@ -120,6 +120,16 @@ Alle Anfragen an willhaben (Anzeigen-Suche, Detail-API, Bilder) können über **
 **Ausschalten:** `"proxy_enabled": false` (Proxy-Daten bleiben stehen) und Neustart. Ohne Config-Änderung geht es auch über Umgebungsvariablen
 im `environment:`-Block, z. B. `WH_PROXY_ENABLED: "false"`. Für einzelne Aufrufe: `--proxy URL` bzw. `--no-proxy`.
 
+**Neuer Tunnel nach einer 429 (Standard):** Mit `"proxy_reconnect_on_429": true` bleibt der Tunnel normal offen und wird nur nach einer 429 geschlossen und neu
+aufgebaut; bei einem Rotator bekommt die Wiederholung so evtl. eine neue IP. Bis zu `proxy_rotating_429_retries` (3) Wiederholungen, erst danach gilt es als Sperre.
+
+**Rotierender Proxy (neue IP pro Anfrage):** Bei HTTPS sieht ein Proxy nur den Verbindungsaufbau, nicht die einzelnen Anfragen im Tunnel. Der Scraper hält
+einen Tunnel offen, ein Rotator mit „pro Anfrage“ wechselt die IP also nur, wenn die Verbindung abreißt. Mit
+`"proxy_new_connection_per_request": true` wird nach jeder Anfrage der Tunnel geschlossen, die nächste baut einen neuen auf (neue IP).
+Eine 429 wird dann bis zu `proxy_rotating_429_retries` (3) Mal über einen neuen Tunnel wiederholt, bevor sie als Sperre gilt.
+Nachteil: pro Anfrage ein TLS-Aufbau (etwas langsamer, mehr Proxy-Verkehr). Die Cookies der Sitzung bleiben erhalten und werden mit wechselnden IPs gesendet;
+ob willhaben/Cloudflare das akzeptiert, ist ungetestet (bei 403-Fehlern den Schalter wieder ausschalten).
+
 **Testen** (zeigt die öffentliche IP direkt und über den Proxy und ob willhaben erreichbar ist):
 ```bash
 docker compose run --rm scraper python willhaben_scraper.py proxytest

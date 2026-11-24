@@ -34,6 +34,10 @@ Beim ersten Start passiert automatisch:
    Der stündliche Incremental-Lauf überspringt Marktplätze, die noch keinen abgeschlossenen Full-Lauf haben.
 3. Der Kopf wartet auf Aufträge.
 
+**Abgebrochener Full-Lauf:** Bricht ein Full-Lauf ab (z. B. nach mehreren Fehlern in Folge), prüft der Scheduler alle `schedule_full_resume_minutes`
+(30, 0 = aus), ob noch Marktplätze ohne abgeschlossenen Full-Lauf übrig sind, und setzt den Lauf nur für diese fort (`full_only_open`). Auch der Full-Lauf beim Start
+bearbeitet nur noch die offenen Marktplätze, der wöchentliche Lauf (So 02:00) dagegen alle. Im Log: `Fortsetzen: … Marktplätze noch ohne abgeschlossenen Full-Lauf`.
+
 ### Erste Prüfung (bitte der Reihe nach)
 ```bash
 docker compose up -d db
@@ -119,6 +123,11 @@ Alle Anfragen an willhaben (Anzeigen-Suche, Detail-API, Bilder) können über **
 
 **Ausschalten:** `"proxy_enabled": false` (Proxy-Daten bleiben stehen) und Neustart. Ohne Config-Änderung geht es auch über Umgebungsvariablen
 im `environment:`-Block, z. B. `WH_PROXY_ENABLED: "false"`. Für einzelne Aufrufe: `--proxy URL` bzw. `--no-proxy`.
+
+**Proxy ausgefallen / Pool leer:** Meldet der Proxy `ProxyError` oder `SSLError` (z. B. weil dem Rotator die Proxys ausgehen), zählt das nicht als Fehler.
+Der Lauf pausiert `proxy_outage_wait_seconds` (600 = 10 Minuten) und versucht dieselbe Anfrage erneut, bis der Proxy antwortet. Im Log:
+`Proxy nicht erreichbar … Pause 600 s` und später `Proxy wieder erreichbar – Lauf geht weiter`. Mit `proxy_outage_max_waits` (Standard 0 = unbegrenzt) legst du eine
+Obergrenze fest, danach schlägt die Anfrage fehl. Es gibt keine automatische Umschaltung auf eine direkte Verbindung. Ohne Proxy gelten diese Fehler weiter als normale Fehlversuche.
 
 **Neuer Tunnel nach einer 429 (Standard):** Mit `"proxy_reconnect_on_429": true` bleibt der Tunnel normal offen und wird nur nach einer 429 geschlossen und neu
 aufgebaut; bei einem Rotator bekommt die Wiederholung so evtl. eine neue IP. Bis zu `proxy_rotating_429_retries` (3) Wiederholungen, erst danach gilt es als Sperre.

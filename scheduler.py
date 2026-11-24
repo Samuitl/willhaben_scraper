@@ -91,9 +91,39 @@ class Scheduler:
             Job("full", lambda: w.run_scrape(cfg, "full"), full_sched, full_sched(now)),
             Job("categories", lambda: w.run_categories(cfg), cat_sched, cat_sched(now)),
         ]
+        resume = int(cfg.get("schedule_full_resume_minutes", 30))
+        if resume > 0:     # unfertigen Full-Lauf nach Abbruch selbst wieder aufnehmen
+            res_sched = lambda n: n + timedelta(minutes=resume)
+            self.jobs.append(Job("full-resume", self.resume_full, res_sched, res_sched(now)))
         for j in self.jobs:
             log.info("Job '%s': nächster Start %s", j.name, j.next_due.strftime("%Y-%m-%d %H:%M %Z"))
         self.startup_thread: Optional[threading.Thread] = None
+
+    # ---- Unfertigen Full-Lauf fortsetzen ---------------------------------- #
+    def full_busy(self) -> bool:
+        """True, wenn gerade ein Full-Lauf aus dem Start oder dem Wochenplan läuft."""
+        if self.startup_thread is not None and self.startup_thread.is_alive():
+            return True
+        return any(j.name == "full" and j.running() for j in self.jobs)
+
+    def resume_full(self) -> int:
+        """Setzt den Full-Lauf für Marktplätze ohne abgeschlossenen Full-Lauf fort (nach Abbruch/Neustart)."""
+        if self.full_busy():
+            return 0
+        db = w.open_storage(self.cfg)
+        try:
+            total, _ = db.marketplace_counts()
+            if not total:
+                return 0
+            mps = w.select_marketplaces(db, self.cfg["categories"], self.cfg["exclude_categories"])
+        finally:
+            db.close()
+        open_ = sum(1 for m in mps if not m.get("last_full_scrape_at"))
+        if open_ == 0:
+            log.debug("Fortsetzen: alle Marktplätze haben einen abgeschlossenen Full-Lauf")
+            return 0
+        log.info("Fortsetzen: %d Marktplätze noch ohne abgeschlossenen Full-Lauf -> Full-Lauf wird fortgesetzt", open_)
+        return w.run_scrape(dict(self.cfg, full_only_open=True), "full")
 
     # ---- Ausführung ------------------------------------------------------- #
     def _run_job(self, name: str, func: Callable[[], int]) -> None:
@@ -143,7 +173,7 @@ class Scheduler:
             if self.cfg.get("full_on_start_if_incomplete") and (total == 0 or never_full > 0):
                 log.info("%s Marktplätze ohne abgeschlossenen Full-Lauf -> Full-Lauf beim Start",
                          "alle" if total == 0 else never_full)
-                self._run_job("full (Start)", lambda: w.run_scrape(self.cfg, "full"))
+                self._run_job("full (Start)", lambda: w.run_scrape(dict(self.cfg, full_only_open=True), "full"))
 
         def safe() -> None:
             try:

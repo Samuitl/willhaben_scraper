@@ -134,12 +134,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "proxy_new_connection_per_request": False,   # true = jede Anfrage baut einen neuen Tunnel auf (Rotator wechselt dann die IP)
     "proxy_reconnect_on_429": True,    # nach einer 429 den Tunnel schließen und neu aufbauen (Rotator vergibt dann evtl. eine neue IP)
     "proxy_rotating_429_retries": 3,   # so oft mit neuem Tunnel wiederholen, bevor eine 429 als Sperre gilt
+    "proxy_outage_wait_seconds": 600,  # Proxy ausgefallen/Pool leer (ProxyError, SSLError): so lange pausieren, dann erneut versuchen
+    "proxy_outage_max_waits": 0,       # nach so vielen Pausen aufgeben (0 = nie, wartet bis der Proxy wieder antwortet)
     # --- Scheduler (scheduler.py) ---
     "schedule_timezone": "Europe/Vienna",
     "schedule_incremental_minutes": 60,
+    "schedule_full_resume_minutes": 30,   # alle so viele Minuten prüfen, ob ein Full-Lauf unfertig ist, und ihn fortsetzen (0 = aus)
     "schedule_full": {"weekday": "sun", "hour": 2, "minute": 0},
     "schedule_categories": {"day": 1, "hour": 1, "minute": 0},   # monatlich
     "full_on_start_if_incomplete": True,   # beim Start: fehlen Kategorien/Full-Läufe, sofort nachholen
+    "full_only_open": False,           # Full-Lauf bearbeitet nur Marktplätze ohne abgeschlossenen Full-Lauf (Start/Fortsetzung)
     "heartbeat_file": None,            # wird regelmäßig berührt (Docker-Healthcheck), z.B. /tmp/scheduler.alive
     # --- Kopf (head.py): Detail-Abrufe und Bilder ---
     "head_poll_seconds": 5,
@@ -571,6 +575,7 @@ class HttpClient:
         attempt = 0        # Netzwerk-/Serverfehler dieser Anfrage
         blocks = 0         # 429-Sperren dieser Anfrage (zählen NICHT als Fehlversuch)
         confirmed = 0      # Bestätigungs-Anfragen nach einer ersten 429
+        outages = 0        # Pausen wegen ausgefallenem Proxy (zählen NICHT als Fehlversuch)
         while True:
             self._wait(self.limiter.acquire())          # gemeinsames Tempo, wartet auch eine 429-Sperre ab
             retry_after: Optional[float] = None
@@ -580,6 +585,22 @@ class HttpClient:
                 finally:
                     if self.fresh:
                         self.session.close()        # Tunnel schließen: nächste Anfrage = neue Verbindung = neue IP
+            except (requests.exceptions.ProxyError, requests.exceptions.SSLError) as e:
+                if not self.proxy:
+                    problem = self._scrub(f"Netzwerkfehler: {e.__class__.__name__}: {str(e)[:200]}")
+                else:
+                    # Proxy ausgefallen / Pool leer: kein Fehlversuch, pausieren und erneut versuchen
+                    outages += 1
+                    cap = int(cfg.get("proxy_outage_max_waits", 0))
+                    if cap and outages > cap:
+                        raise RequestFailed(f"Proxy {redact_proxy(self.proxy)} nach {outages - 1} Pausen weiter nicht "
+                                            f"erreichbar: {e.__class__.__name__}") from e
+                    pause = float(cfg.get("proxy_outage_wait_seconds", 600))
+                    log.warning("Proxy nicht erreichbar (%s: %s) – Pause %.0f s, dann erneuter Versuch (Pause %d)",
+                                e.__class__.__name__, self._scrub(str(e))[:120], pause, outages)
+                    self.session.close()
+                    self._wait(pause)
+                    continue
             except (requests.Timeout, requests.ConnectionError,
                     requests.exceptions.ChunkedEncodingError, requests.exceptions.ContentDecodingError) as e:
                 problem = self._scrub(f"Netzwerkfehler: {e.__class__.__name__}: {str(e)[:200]}")
@@ -589,6 +610,8 @@ class HttpClient:
                 code = resp.status_code
                 if code == 200:
                     self.limiter.success()
+                    if outages:
+                        log.info("Proxy wieder erreichbar – Lauf geht weiter")
                     if confirmed:
                         log.info("Bestätigungs-Anfrage erfolgreich – die 429 war einmalig, keine Sperre")
                     return resp
@@ -1969,6 +1992,14 @@ def run_scrape(cfg: dict, mode: Optional[str] = None) -> int:
                              "übersprungen", total - len(mps))
                 if not mps:
                     log.warning("Noch kein Marktplatz hat einen abgeschlossenen Full-Lauf – nichts zu tun.")
+                    return 0
+            if mode == "full" and cfg.get("full_only_open"):
+                total = len(mps)
+                mps = [m for m in mps if not m.get("last_full_scrape_at")]
+                log.info("%d Marktplätze haben schon einen abgeschlossenen Full-Lauf – bearbeitet werden die %d offenen",
+                         total - len(mps), len(mps))
+                if not mps:
+                    log.info("Alle ausgewählten Marktplätze sind fertig – nichts zu tun.")
                     return 0
             if cfg["oldest_first"]:
                 key = "last_full_scrape_at" if mode == "full" else "last_scraped_at"

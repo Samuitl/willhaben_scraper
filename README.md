@@ -124,9 +124,13 @@ Alle Anfragen an willhaben (Anzeigen-Suche, Detail-API, Bilder) können über **
 **Ausschalten:** `"proxy_enabled": false` (Proxy-Daten bleiben stehen) und Neustart. Ohne Config-Änderung geht es auch über Umgebungsvariablen
 im `environment:`-Block, z. B. `WH_PROXY_ENABLED: "false"`. Für einzelne Aufrufe: `--proxy URL` bzw. `--no-proxy`.
 
+**HTTP 403 über Proxy:** Antwortet willhaben mit 403 („Deine IP-Adresse wurde blockiert“), ist meist nur der gerade verwendete Ausgang gesperrt. Mit Proxy wird die
+Anfrage bis zu `proxy_403_retries` (3) Mal über einen neuen Tunnel wiederholt (`proxy_403_retry_delay_seconds`, 3 s Pause). Ohne Proxy bleibt 403 ein sofortiger Fehler.
+Sind alle Ausgänge des Pools gesperrt, schlägt die Anfrage nach den Wiederholungen trotzdem fehl; dann braucht es einen anderen Proxy-Pool.
+
 **Proxy ausgefallen / Pool leer:** Meldet der Proxy `ProxyError` oder `SSLError` (z. B. weil dem Rotator die Proxys ausgehen), zählt das nicht als Fehler.
-Der Lauf pausiert `proxy_outage_wait_seconds` (600 = 10 Minuten) und versucht dieselbe Anfrage erneut, bis der Proxy antwortet. Im Log:
-`Proxy nicht erreichbar … Pause 600 s` und später `Proxy wieder erreichbar – Lauf geht weiter`. Mit `proxy_outage_max_waits` (Standard 0 = unbegrenzt) legst du eine
+Der Lauf pausiert mit steigender Pause (`proxy_outage_waits`: 5, 15, 30, 60, 120, 300, 600 Sekunden, die letzte gilt weiter) und versucht dieselbe Anfrage erneut, bis der Proxy antwortet. Jede neue Anfrage beginnt wieder bei 5 s, denn oft hilft schon ein neuer Tunnel (anderer Proxy). Im Log:
+`Proxy nicht erreichbar … Pause 5 s` und später `Proxy wieder erreichbar – Lauf geht weiter`. Mit `proxy_outage_max_waits` (Standard 0 = unbegrenzt) legst du eine
 Obergrenze fest, danach schlägt die Anfrage fehl. Es gibt keine automatische Umschaltung auf eine direkte Verbindung. Ohne Proxy gelten diese Fehler weiter als normale Fehlversuche.
 
 **Neuer Tunnel nach einer 429 (Standard):** Mit `"proxy_reconnect_on_429": true` bleibt der Tunnel normal offen und wird nur nach einer 429 geschlossen und neu
@@ -182,6 +186,7 @@ addieren sich deren Anfragen bei willhaben. Fehler `407` heißt: Proxy lehnt Ben
 | `willhaben_scraper.py` | Scraper, Datenbank (SQLite/PostgreSQL), Aufteilung großer Marktplätze |
 | `scheduler.py` | Zeitplan: incremental, full, Kategorien; Start-Prüfung |
 | `head.py` | Der Kopf: Warteschlange, Detail-Abrufe, Bilder |
+| `BEFEHLE.md` | Befehle zum Prüfen des Fortschritts und zur Fehlersuche |
 | `healthcheck.py` | Docker-Healthcheck (Heartbeat-Datei) |
 | `config.json` | Einstellungen |
 | `Dockerfile`, `requirements.txt` | Ein Image für Scraper und Kopf |

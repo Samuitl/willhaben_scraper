@@ -134,7 +134,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "proxy_new_connection_per_request": False,   # true = jede Anfrage baut einen neuen Tunnel auf (Rotator wechselt dann die IP)
     "proxy_reconnect_on_429": True,    # nach einer 429 den Tunnel schließen und neu aufbauen (Rotator vergibt dann evtl. eine neue IP)
     "proxy_rotating_429_retries": 3,   # so oft mit neuem Tunnel wiederholen, bevor eine 429 als Sperre gilt
-    "proxy_outage_wait_seconds": 600,  # Proxy ausgefallen/Pool leer (ProxyError, SSLError): so lange pausieren, dann erneut versuchen
+    "proxy_403_retries": 3,            # HTTP 403 (Ausgang/IP gesperrt) über einen neuen Tunnel so oft wiederholen (nur mit Proxy, 0 = aus)
+    "proxy_403_retry_delay_seconds": 3.0,   # Pause vor dieser Wiederholung
+    "proxy_outage_wait_seconds": 600,  # nur wenn proxy_outage_waits leer ist: feste Pause nach ProxyError/SSLError
+    "proxy_outage_waits": [5, 15, 30, 60, 120, 300, 600],   # steigende Pausen nach Proxy-Fehlern (Sekunden), die letzte gilt weiter
     "proxy_outage_max_waits": 0,       # nach so vielen Pausen aufgeben (0 = nie, wartet bis der Proxy wieder antwortet)
     # --- Scheduler (scheduler.py) ---
     "schedule_timezone": "Europe/Vienna",
@@ -576,6 +579,7 @@ class HttpClient:
         blocks = 0         # 429-Sperren dieser Anfrage (zählen NICHT als Fehlversuch)
         confirmed = 0      # Bestätigungs-Anfragen nach einer ersten 429
         outages = 0        # Pausen wegen ausgefallenem Proxy (zählen NICHT als Fehlversuch)
+        forbidden = 0      # Wiederholungen nach HTTP 403 über einen neuen Tunnel
         while True:
             self._wait(self.limiter.acquire())          # gemeinsames Tempo, wartet auch eine 429-Sperre ab
             retry_after: Optional[float] = None
@@ -595,7 +599,8 @@ class HttpClient:
                     if cap and outages > cap:
                         raise RequestFailed(f"Proxy {redact_proxy(self.proxy)} nach {outages - 1} Pausen weiter nicht "
                                             f"erreichbar: {e.__class__.__name__}") from e
-                    pause = float(cfg.get("proxy_outage_wait_seconds", 600))
+                    waits = cfg.get("proxy_outage_waits") or [cfg.get("proxy_outage_wait_seconds", 600)]
+                    pause = float(waits[min(outages - 1, len(waits) - 1)])
                     log.warning("Proxy nicht erreichbar (%s: %s) – Pause %.0f s, dann erneuter Versuch (Pause %d)",
                                 e.__class__.__name__, self._scrub(str(e))[:120], pause, outages)
                     self.session.close()
@@ -610,6 +615,8 @@ class HttpClient:
                 code = resp.status_code
                 if code == 200:
                     self.limiter.success()
+                    if forbidden:
+                        log.info("Nach %d Wiederholung(en) über einen neuen Tunnel erfolgreich (403 war der Ausgang)", forbidden)
                     if outages:
                         log.info("Proxy wieder erreichbar – Lauf geht weiter")
                     if confirmed:
@@ -619,6 +626,16 @@ class HttpClient:
                     raise RequestFailed(
                         f"HTTP 407 – der Proxy ({redact_proxy(self.proxy or '-')}) verlangt Zugangsdaten oder lehnt "
                         f"sie ab. proxy_user/proxy_password(_file) prüfen.", status=407)
+                if (code == 403 and self.proxy and (self.fresh or self.reconnect_on_429)
+                        and forbidden < int(cfg.get("proxy_403_retries", 3))):
+                    forbidden += 1
+                    pause = float(cfg.get("proxy_403_retry_delay_seconds", 3.0))
+                    log.warning("HTTP 403 über Proxy (Ausgang vermutlich gesperrt) – Wiederholung %d/%d über einen neuen Tunnel in %.0f s",
+                                forbidden, int(cfg.get("proxy_403_retries", 3)), pause)
+                    if not self.fresh:
+                        self.session.close()
+                    self._wait(pause)
+                    continue
                 if code in (401, 403):
                     raise RequestFailed(
                         f"HTTP {code} für {resp.url} – Zugriff verweigert/blockiert. {_block_info(resp)}",
